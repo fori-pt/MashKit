@@ -10,7 +10,7 @@ import json
 import re
 import os
 
-DATASET_DIR = r"C:\Users\Asus\Documents\FEUP\Musica Interativa\mashup_dataset-20260318T213329Z-3-001\mashup_dataset"
+DATASET_DIR = r"C:\Users\Dani\Music\interactive music\mashup_dataset"
 CACHE_PATH = os.path.join(os.path.dirname(DATASET_DIR), "analysis_cache.json")
 
 KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
@@ -58,6 +58,8 @@ def analyze_file(filepath: str) -> dict:
     rms = librosa.feature.rms(y=y)
     energy = float(np.mean(rms))
     duration = float(librosa.get_duration(y=y, sr=sr))
+    beat_times = librosa.frames_to_time(beats, sr=sr)
+    first_beat = round(float(beat_times[0]), 3) if len(beat_times) > 0 else 0.0
     return {
         "bpm": round(bpm, 1),
         "key": f"{key_name} {'Major' if mode else 'minor'}",
@@ -67,6 +69,7 @@ def analyze_file(filepath: str) -> dict:
         "energy": round(min(energy * 1000, 100), 1),
         "duration": round(duration, 2),
         "beats": len(beats),
+        "first_beat": first_beat,
     }
 
 
@@ -214,6 +217,67 @@ async def search_tracks(bpm: float, key_num: int, mode: int):
 
     results.sort(key=lambda x: x["score"])
     return {"tracks": results}
+
+
+@app.get("/first_beat/{filename}")
+async def get_first_beat(filename: str):
+    """Return the first beat timestamp (seconds) for a dataset track."""
+    # Check in-memory cache first (populated if first_beat was stored)
+    for track in dataset_tracks:
+        if track["filename"] == filename and "first_beat" in track:
+            return {"first_beat": track["first_beat"]}
+    # Fall back to computing it (cache didn't have first_beat yet)
+    filepath = os.path.join(DATASET_DIR, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    _, beats = librosa.beat.beat_track(y=y, sr=sr)
+    beat_times = librosa.frames_to_time(beats, sr=sr)
+    first_beat = round(float(beat_times[0]), 3) if len(beat_times) > 0 else 0.0
+    return {"first_beat": first_beat}
+
+
+@app.get("/loop_region/{filename}")
+async def loop_region(filename: str):
+    """Return the best 8-bar loop region (start/end in seconds) for seamless looping."""
+    filepath = os.path.join(DATASET_DIR, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    _, beats = librosa.beat.beat_track(y=y, sr=sr)
+    beat_times = librosa.frames_to_time(beats, sr=sr)
+    if len(beat_times) < 32:
+        end = float(beat_times[-1]) if len(beat_times) > 0 else 30.0
+        return {"start": 0.0, "end": end, "bars": 4}
+    # Skip intro (first 20s), snap to 4-beat boundary
+    idx = int(np.searchsorted(beat_times, 20.0))
+    idx = (idx // 4) * 4
+    if idx + 32 >= len(beat_times):
+        idx = max(0, len(beat_times) - 32)
+    return {
+        "start": round(float(beat_times[idx]), 3),
+        "end": round(float(beat_times[idx + 32]), 3),
+        "bars": 8,
+    }
+
+
+@app.get("/chorus_time/{filename}")
+async def chorus_time(filename: str):
+    """Return the timestamp (seconds) of the most energetic 10-second window."""
+    filepath = os.path.join(DATASET_DIR, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="File not found")
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    window = int(sr * 10)
+    if len(y) < window:
+        return {"start": 0.0}
+    rms = np.array([
+        float(np.sqrt(np.mean(y[i : i + window] ** 2)))
+        for i in range(0, len(y) - window, window // 2)
+    ])
+    best = int(np.argmax(rms))
+    start_sec = round((best * window / 2) / sr, 2)
+    return {"start": start_sec}
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { Track } from "@/app/page";
+
+const API = "http://localhost:8000";
 
 interface Props {
   tracks: Track[];
@@ -21,15 +23,49 @@ function Card({
 }) {
   const ref = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const toggle = (e: React.MouseEvent) => {
+  // cleanup on unmount
+  useEffect(() => () => {
+    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+  }, []);
+
+  const stopAudio = () => {
+    ref.current?.pause();
+    if (ref.current) ref.current.currentTime = 0;
+    setPlaying(false);
+    setPreviewing(false);
+    if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+  };
+
+  const toggle = async (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (playing) {
-      ref.current?.pause();
-      setPlaying(false);
-    } else {
-      ref.current?.play();
-      setPlaying(true);
+    if (playing || previewing) {
+      stopAudio();
+      return;
+    }
+    // fetch chorus start time, then play 10 s preview
+    setPreviewing(true);
+    try {
+      const res = await fetch(`${API}/chorus_time/${encodeURIComponent(track.filename)}`);
+      const data = await res.json();
+      const start: number = data.start ?? 0;
+      if (ref.current) {
+        ref.current.currentTime = start;
+        await ref.current.play();
+        setPlaying(true);
+        previewTimerRef.current = setTimeout(stopAudio, 10_000);
+      }
+    } catch {
+      // fallback: play from beginning
+      if (ref.current) {
+        await ref.current.play();
+        setPlaying(true);
+        previewTimerRef.current = setTimeout(stopAudio, 10_000);
+      }
+    } finally {
+      setPreviewing(false);
     }
   };
 
@@ -63,16 +99,25 @@ function Card({
       <button
         onClick={toggle}
         className={`
-          flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg
+          relative flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg
           transition-colors
           ${playing ? "bg-mist text-coal" : "bg-ocean/60 text-foam group-hover:bg-ocean"}
         `}
+        title={playing ? "Stop preview" : "Play 10s chorus preview"}
       >
-        {playing ? (
-          <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
-            <rect x="6" y="4" width="4" height="16" />
-            <rect x="14" y="4" width="4" height="16" />
+        {previewing ? (
+          <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+            <path d="M12 2a10 10 0 0 1 10 10" />
           </svg>
+        ) : playing ? (
+          <>
+            <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+              <rect x="6" y="4" width="4" height="16" />
+              <rect x="14" y="4" width="4" height="16" />
+            </svg>
+            <span className="absolute -bottom-1 -right-1 rounded-full bg-green-400 px-1 text-[9px] font-bold text-coal leading-tight">10s</span>
+          </>
         ) : (
           <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
             <path d="M8 5v14l11-7z" />
@@ -110,7 +155,7 @@ function Card({
       <audio
         ref={ref}
         src={track.audio_url}
-        onEnded={() => setPlaying(false)}
+        onEnded={stopAudio}
       />
     </div>
   );

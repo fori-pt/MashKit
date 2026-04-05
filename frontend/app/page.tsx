@@ -15,6 +15,7 @@ export interface AnalysisData {
   energy: number;
   duration: number;
   beats: number;
+  first_beat: number;
   filename: string;
 }
 
@@ -150,6 +151,7 @@ export default function Home() {
           <MashupPlayer
             sourceFile={file}
             sourceBpm={analysis.bpm}
+            sourceFirstBeat={analysis.first_beat}
             track={selected}
           />
         )}

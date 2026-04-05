@@ -11,7 +11,8 @@
     "next": "^14.2.21",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-dropzone": "^14.3.5"
+    "react-dropzone": "^14.3.5",
+    "wavesurfer.js": "^7.12.5"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",
