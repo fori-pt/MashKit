@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Track } from "@/app/page";
 import WaveformPlayer from "./WaveformPlayer";
+import SamplePads from "./SamplePads";
+import LoopDeck from "./LoopDeck";
 
 const API = "http://localhost:8000";
 
@@ -276,6 +278,18 @@ export default function MashupPlayer({ sourceFile, sourceBpm, sourceFirstBeat, t
     setPlayingB(false);
   };
 
+  // ─── Keyboard shortcut: Space → Play/Pause both ──────────────
+  const toggleBothRef = useRef(toggleBoth);
+  useEffect(() => { toggleBothRef.current = toggleBoth; });
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.code === "Space") { e.preventDefault(); toggleBothRef.current(); }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
   // Update rates live when vibe/sync changes while playing
   useEffect(() => {
     if (playingA && srcRef.current) srcRef.current.playbackRate = vibeRate;
@@ -533,6 +547,12 @@ export default function MashupPlayer({ sourceFile, sourceBpm, sourceFirstBeat, t
           </button>
         )}
       </div>
+
+      {/* ── Loop Deck ─────────────────────────────────────────── */}
+      <LoopDeck masterBpm={sourceBpm} />
+
+      {/* ── Sample Pads ──────────────────────────────────────── */}
+      <SamplePads />
 
       {/* Hidden audio elements */}
       {srcUrl && <audio ref={srcRef} src={srcUrl} />}
