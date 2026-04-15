@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import TrimModal from "./TrimModal";
 
 // ─── Shared AudioContext ───────────────────────────────────────────────────────
 let _ctx: AudioContext | null = null;
@@ -177,6 +178,11 @@ export default function SamplePads() {
   const [loading, setLoading] = useState<number | null>(null);
   const [editLabel, setEditLabel] = useState("");
 
+  // Trim modal state
+  const [trimBuffer, setTrimBuffer] = useState<AudioBuffer | null>(null);
+  const [trimFileName, setTrimFileName] = useState("");
+  const [trimTargetIdx, setTrimTargetIdx] = useState<number | null>(null);
+
   const flashRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editingIdxRef = useRef<number | null>(null);
@@ -236,19 +242,47 @@ export default function SamplePads() {
       const arrayBuf = await file.arrayBuffer();
       const ctx = getCtx();
       const audioBuf = await ctx.decodeAudioData(arrayBuf);
-      const label = editLabel.trim() || file.name.replace(/\.[^.]+$/, "");
-      setCustom((prev) => {
-        const next = [...prev];
-        next[idx] = { label, fileName: file.name, buffer: audioBuf };
-        return next;
-      });
-      flash(idx); // preview it immediately
-      playBuffer(ctx, audioBuf);
+
+      if (audioBuf.duration > 5) {
+        // File too long — open the trim modal
+        setTrimBuffer(audioBuf);
+        setTrimFileName(file.name);
+        setTrimTargetIdx(idx);
+        setEditing(null); // close the edit popover
+      } else {
+        const label = editLabel.trim() || file.name.replace(/\.[^.]+$/, "");
+        setCustom((prev) => {
+          const next = [...prev];
+          next[idx] = { label, fileName: file.name, buffer: audioBuf };
+          return next;
+        });
+        flash(idx);
+        playBuffer(ctx, audioBuf);
+      }
     } catch {
       // unsupported format — silently ignore
     } finally {
       setLoading(null);
     }
+  };
+
+  const handleTrimConfirm = (croppedBuffer: AudioBuffer) => {
+    if (trimTargetIdx === null) return;
+    const label = editLabel.trim() || trimFileName.replace(/\.[^.]+$/, "") || "Custom";
+    setCustom((prev) => {
+      const next = [...prev];
+      next[trimTargetIdx] = { label, fileName: trimFileName, buffer: croppedBuffer };
+      return next;
+    });
+    flash(trimTargetIdx);
+    playBuffer(getCtx(), croppedBuffer);
+    setTrimBuffer(null);
+    setTrimTargetIdx(null);
+  };
+
+  const handleTrimCancel = () => {
+    setTrimBuffer(null);
+    setTrimTargetIdx(null);
   };
 
   // Save label change only
@@ -410,6 +444,16 @@ export default function SamplePads() {
           );
         })}
       </div>
+
+      {/* Trim Modal */}
+      {trimBuffer && (
+        <TrimModal
+          buffer={trimBuffer}
+          fileName={trimFileName}
+          onConfirm={handleTrimConfirm}
+          onCancel={handleTrimCancel}
+        />
+      )}
     </div>
   );
 }

@@ -93,39 +93,46 @@ index_status = {"ready": False, "progress": 0, "total": 0, "current": ""}
 
 def build_index():
     global dataset_tracks
+
+    # Load whatever is already cached
     if os.path.exists(CACHE_PATH):
         with open(CACHE_PATH, encoding="utf-8") as f:
             dataset_tracks = json.load(f)
-        cached = {t["filename"] for t in dataset_tracks}
-        all_files = {f for f in os.listdir(DATASET_DIR) if f.endswith(".wav")}
-        if all_files <= cached:
-            index_status["ready"] = True
-            index_status["progress"] = len(dataset_tracks)
-            index_status["total"] = len(dataset_tracks)
-            print(f"Loaded cache with {len(dataset_tracks)} tracks")
-            return
+        print(f"Loaded cache with {len(dataset_tracks)} existing tracks")
+    else:
+        dataset_tracks = []
 
-    files = sorted(f for f in os.listdir(DATASET_DIR) if f.endswith(".wav"))
-    index_status["total"] = len(files)
-    dataset_tracks = []
+    cached = {t["filename"] for t in dataset_tracks}
+    all_files = sorted(f for f in os.listdir(DATASET_DIR) if f.endswith(".wav"))
+    new_files = [f for f in all_files if f not in cached]
 
-    for i, fname in enumerate(files):
-        index_status["progress"] = i
+    if not new_files:
+        index_status["ready"] = True
+        index_status["progress"] = len(dataset_tracks)
+        index_status["total"] = len(dataset_tracks)
+        print("Cache up to date — no new tracks to analyze")
+        return
+
+    print(f"Found {len(new_files)} new track(s) to analyze")
+    index_status["total"] = len(dataset_tracks) + len(new_files)
+
+    for i, fname in enumerate(new_files):
+        index_status["progress"] = len(dataset_tracks)
         index_status["current"] = fname
         artist, title = parse_track_name(fname)
         try:
             info = analyze_file(os.path.join(DATASET_DIR, fname))
             dataset_tracks.append({"filename": fname, "artist": artist, "title": title, **info})
-            print(f"  [{i+1}/{len(files)}] {artist} - {title}: {info['bpm']} BPM, {info['key']}")
+            print(f"  [{i+1}/{len(new_files)}] {artist} - {title}: {info['bpm']} BPM, {info['key']}")
         except Exception as e:
-            print(f"  [{i+1}/{len(files)}] FAILED {fname}: {e}")
+            print(f"  [{i+1}/{len(new_files)}] FAILED {fname}: {e}")
 
     with open(CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(dataset_tracks, f, indent=2)
 
-    index_status["progress"] = len(files)
+    index_status["progress"] = len(dataset_tracks)
     index_status["ready"] = True
-    print(f"Dataset indexed: {len(dataset_tracks)} tracks cached")
+    print(f"Dataset indexed: {len(dataset_tracks)} tracks total")
 
 
 # ---------- key compatibility ----------

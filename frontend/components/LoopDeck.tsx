@@ -109,6 +109,17 @@ function generateLoop(ctx: AudioContext, def: LoopDef): AudioBuffer {
   return buf;
 }
 
+// ─── User loop type ───────────────────────────────────────────────────────────
+interface UserLoop {
+  id: string;       // unique key (file name + size)
+  name: string;
+  file: File;
+  bpm: number | null;   // null = not yet analyzed
+  key: string | null;
+}
+
+const API = "http://localhost:8000";
+
 // ─── Component ────────────────────────────────────────────────────────────────
 interface Props { masterBpm: number; }
 
@@ -117,6 +128,12 @@ export default function LoopDeck({ masterBpm }: Props) {
   const [selected, setSelected] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
   const [volume, setVolume] = useState(70);
+
+  // User-loaded loops from local folder
+  const [userLoops, setUserLoops] = useState<UserLoop[]>([]);
+  const [selectedUser, setSelectedUser] = useState<string | null>(null);
+  const [scanningFolder, setScanningFolder] = useState(false);
+  const userBufferCache = useRef<Map<string, AudioBuffer>>(new Map());
 
   const ctxRef = useRef<AudioContext | null>(null);
   const bufferCache = useRef<Map<number, AudioBuffer>>(new Map());
@@ -171,9 +188,14 @@ export default function LoopDeck({ masterBpm }: Props) {
   // Update playback rate live when masterBpm changes
   useEffect(() => {
     const src = sourceRef.current;
-    if (!src || selected === null) return;
-    src.playbackRate.value = masterBpm / LOOP_DEFS[selected].bpm;
-  }, [masterBpm, selected]);
+    if (!src) return;
+    if (selected !== null) {
+      src.playbackRate.value = masterBpm / LOOP_DEFS[selected].bpm;
+    } else if (selectedUser) {
+      const loop = userLoops.find((l) => l.id === selectedUser);
+      if (loop?.bpm) src.playbackRate.value = masterBpm / loop.bpm;
+    }
+  }, [masterBpm, selected, selectedUser, userLoops]);
 
   // Update gain live
   useEffect(() => {
@@ -183,20 +205,134 @@ export default function LoopDeck({ masterBpm }: Props) {
   // Cleanup on unmount
   useEffect(() => () => { stopSource(); ctxRef.current?.close(); }, []);
 
+  // ── Recursive audio file collector ───────────────────────────────────────
+  const collectAudioFiles = async (
+    // @ts-ignore
+    dirHandle,
+    AUDIO_EXTS: RegExp,
+    prefix = ""
+  ): Promise<UserLoop[]> => {
+    const loops: UserLoop[] = [];
+    // @ts-ignore
+    for await (const [name, handle] of dirHandle.entries()) {
+      const fullPath = prefix ? `${prefix}/${name}` : name;
+      if (handle.kind === "file" && AUDIO_EXTS.test(name)) {
+        const file: File = await handle.getFile();
+        loops.push({
+          id: `${fullPath}-${file.size}`,
+          name: name.replace(/\.[^.]+$/, ""), // display name: just filename
+          file,
+          bpm: null,
+          key: null,
+        });
+      } else if (handle.kind === "directory") {
+        // Recurse into subfolder
+        const sub = await collectAudioFiles(handle, AUDIO_EXTS, fullPath);
+        loops.push(...sub);
+      }
+    }
+    return loops;
+  };
+
+  // ── Folder scanner + background analysis ─────────────────────────────────
+  const scanFolder = async () => {
+    if (!("showDirectoryPicker" in window)) {
+      alert("Your browser doesn't support folder access (try Chrome or Edge).");
+      return;
+    }
+    setScanningFolder(true);
+    try {
+      // @ts-ignore — File System Access API not yet in TS lib
+      const dirHandle = await window.showDirectoryPicker({ mode: "read" });
+      const AUDIO_EXTS = /\.(wav|mp3|flac|aiff?|m4a|ogg)$/i;
+      const loops = await collectAudioFiles(dirHandle, AUDIO_EXTS);
+      loops.sort((a, b) => a.name.localeCompare(b.name));
+      setUserLoops(loops);
+      userBufferCache.current.clear();
+
+      // Analyze all files in the background (3 at a time)
+      const CONCURRENCY = 3;
+      for (let i = 0; i < loops.length; i += CONCURRENCY) {
+        await Promise.all(
+          loops.slice(i, i + CONCURRENCY).map(async (loop) => {
+            const fd = new FormData();
+            fd.append("file", loop.file);
+            try {
+              const res = await fetch(`${API}/analyze`, { method: "POST", body: fd });
+              if (res.ok) {
+                const data = await res.json();
+                setUserLoops((prev) =>
+                  prev.map((l) =>
+                    l.id === loop.id ? { ...l, bpm: data.bpm, key: data.key } : l
+                  )
+                );
+              }
+            } catch {}
+          })
+        );
+      }
+    } catch {
+      // User cancelled picker — ignore
+    } finally {
+      setScanningFolder(false);
+    }
+  };
+
+  // ── User loop playback ────────────────────────────────────────────────────
+  const playUserLoop = async (loop: UserLoop) => {
+    const ctx = getCtx();
+    if (ctx.state === "suspended") ctx.resume();
+
+    // Decode if not cached
+    if (!userBufferCache.current.has(loop.id)) {
+      const ab = await loop.file.arrayBuffer();
+      const decoded = await ctx.decodeAudioData(ab);
+      userBufferCache.current.set(loop.id, decoded);
+    }
+    const audioBuf = userBufferCache.current.get(loop.id)!;
+
+    if (!gainRef.current) {
+      gainRef.current = ctx.createGain();
+      gainRef.current.connect(ctx.destination);
+    }
+    gainRef.current.gain.value = volume / 100;
+
+    stopSource();
+    const src = ctx.createBufferSource();
+    src.buffer = audioBuf;
+    src.loop = true;
+    // If we know the loop's BPM, tempo-match to master; else play at native rate
+    src.playbackRate.value = loop.bpm ? masterBpm / loop.bpm : 1;
+    src.connect(gainRef.current);
+    src.start();
+    sourceRef.current = src;
+  };
+
+  const handleUserSelect = async (loop: UserLoop) => {
+    setSelectedUser(loop.id);
+    setSelected(null); // deselect preset
+    if (playing) await playUserLoop(loop);
+  };
+
   const handleSelect = (idx: number) => {
     if (selected === idx) return;
     setSelected(idx);
+    setSelectedUser(null);
     if (playing) startLoop(idx);
   };
 
-  const togglePlay = () => {
+  const togglePlay = async () => {
     if (playing) {
       stopSource();
       setPlaying(false);
     } else {
-      if (selected === null) return;
-      startLoop(selected);
-      setPlaying(true);
+      if (selectedUser !== null) {
+        const loop = userLoops.find((l) => l.id === selectedUser);
+        if (loop) { await playUserLoop(loop); setPlaying(true); }
+      } else if (selected !== null) {
+        startLoop(selected);
+        setPlaying(true);
+      }
     }
   };
 
@@ -213,8 +349,10 @@ export default function LoopDeck({ masterBpm }: Props) {
           </span>
           {playing && (
             <span className="flex items-center gap-1 rounded-full bg-green-500/20 px-2 py-0.5 text-[10px] font-semibold text-green-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-green-400 animate-pulse" />
-              {LOOP_DEFS[selected!]?.name}
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-400" />
+              {selectedUser
+                ? userLoops.find((l) => l.id === selectedUser)?.name ?? "Loop"
+                : LOOP_DEFS[selected!]?.name}
             </span>
           )}
         </div>
@@ -281,11 +419,110 @@ export default function LoopDeck({ masterBpm }: Props) {
               />
             </div>
 
-            {selected !== null && (
-              <div className="text-right text-[10px] text-mist/30 flex-shrink-0">
+            {selected !== null && !selectedUser && (
+              <div className="flex-shrink-0 text-right text-[10px] text-mist/30">
                 <div>Native: {LOOP_DEFS[selected].bpm} BPM</div>
                 <div>Rate: ×{(masterBpm / LOOP_DEFS[selected].bpm).toFixed(2)}</div>
               </div>
+            )}
+            {selectedUser && (() => {
+              const loop = userLoops.find((l) => l.id === selectedUser);
+              return loop ? (
+                <div className="flex-shrink-0 text-right text-[10px] text-mist/30">
+                  {loop.bpm ? (
+                    <>
+                      <div>Native: {loop.bpm} BPM</div>
+                      <div>Rate: ×{(masterBpm / loop.bpm).toFixed(2)}</div>
+                    </>
+                  ) : (
+                    <div>Analyzing BPM…</div>
+                  )}
+                </div>
+              ) : null;
+            })()}
+          </div>
+
+          {/* ── Local Folder ─────────────────────────────────────────────────── */}
+          <div className="space-y-2 border-t border-ocean/20 pt-3">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-mist/30">
+                Local Loops
+              </span>
+              <button
+                onClick={scanFolder}
+                disabled={scanningFolder}
+                className="flex items-center gap-1.5 rounded-lg border border-ocean/40 px-2.5 py-1 text-[10px] font-semibold text-mist/60 transition-colors hover:bg-ocean/20 hover:text-mist disabled:opacity-40"
+              >
+                {scanningFolder ? (
+                  <svg className="h-3 w-3 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10" strokeOpacity="0.2" />
+                    <path d="M12 2a10 10 0 0 1 10 10" />
+                  </svg>
+                ) : (
+                  <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth="2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 7a2 2 0 012-2h3l2 2h7a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+                  </svg>
+                )}
+                {scanningFolder ? "Scanning…" : userLoops.length > 0 ? `${userLoops.length} files · Change` : "Connect Folder"}
+              </button>
+            </div>
+
+            {userLoops.length > 0 && (
+              <div className="flex gap-2 overflow-x-auto pb-1">
+                {userLoops.map((loop) => {
+                  const isSelected = selectedUser === loop.id;
+                  const analyzing = loop.bpm === null;
+                  const rate = loop.bpm ? masterBpm / loop.bpm : null;
+                  return (
+                    <button
+                      key={loop.id}
+                      onClick={() => handleUserSelect(loop)}
+                      className={`flex flex-shrink-0 flex-col items-center gap-1 rounded-xl border px-3 py-2 transition-all ${
+                        isSelected
+                          ? "border-mist/60 bg-mist/15 text-mist"
+                          : "border-ocean/30 text-mist/50 hover:border-ocean/60 hover:text-mist"
+                      }`}
+                    >
+                      {/* Icon / spinner */}
+                      {analyzing ? (
+                        <svg className="h-4 w-4 animate-spin text-mist/30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <circle cx="12" cy="12" r="10" strokeOpacity="0.2" />
+                          <path d="M12 2a10 10 0 0 1 10 10" />
+                        </svg>
+                      ) : (
+                        <span className="text-lg leading-none">🎵</span>
+                      )}
+                      <span className="max-w-[80px] truncate text-[10px] font-semibold">
+                        {loop.name}
+                      </span>
+                      {loop.bpm !== null && (
+                        <span className="text-[9px] text-mist/40">
+                          {loop.bpm} BPM
+                        </span>
+                      )}
+                      {loop.key && (
+                        <span className="text-[9px] text-mist/30">
+                          {loop.key}
+                        </span>
+                      )}
+                      {rate !== null && isSelected && (
+                        <span className="text-[9px] text-mist/40">
+                          ×{rate.toFixed(2)}
+                        </span>
+                      )}
+                      {analyzing && (
+                        <span className="text-[9px] text-mist/25">analyzing…</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {userLoops.length === 0 && !scanningFolder && (
+              <p className="text-center text-[10px] text-mist/20">
+                Connect a folder to load your own loops
+              </p>
             )}
           </div>
         </div>
